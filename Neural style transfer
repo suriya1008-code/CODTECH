@@ -1,0 +1,97 @@
+import tensorflow as tf
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+
+# Load and preprocess image
+def load_image(img_path, max_dim=512):
+    img = Image.open(img_path)
+    long = max(img.size)
+    scale = max_dim / long
+    img = img.resize((round(img.size[0]*scale), round(img.size[1]*scale)))
+    img = np.array(img)
+    img = img[np.newaxis, :]
+    return tf.image.convert_image_dtype(img, tf.float32)
+
+# Display image
+def show_image(image, title=None):
+    image = tf.squeeze(image, axis=0)
+    plt.imshow(image)
+    if title:
+        plt.title(title)
+    plt.axis('off')
+
+# Load images
+content_image = load_image("content.jpg")
+style_image = load_image("style.jpg")
+
+# Load VGG19 model
+vgg = tf.keras.applications.VGG19(include_top=False, weights='imagenet')
+vgg.trainable = False
+
+# Style & content layers
+content_layers = ['block5_conv2']
+style_layers = [
+    'block1_conv1',
+    'block2_conv1',
+    'block3_conv1',
+    'block4_conv1',
+    'block5_conv1'
+]
+
+def get_model():
+    outputs = [vgg.get_layer(name).output for name in (style_layers + content_layers)]
+    model = tf.keras.Model([vgg.input], outputs)
+    return model
+
+model = get_model()
+
+# Gram matrix
+def gram_matrix(input_tensor):
+    result = tf.linalg.einsum('bijc,bijd->bcd', input_tensor, input_tensor)
+    input_shape = tf.shape(input_tensor)
+    num_locations = tf.cast(input_shape[1]*input_shape[2], tf.float32)
+    return result / num_locations
+
+# Extract features
+def extract_features(image):
+    outputs = model(image)
+    style_outputs = outputs[:len(style_layers)]
+    content_outputs = outputs[len(style_layers):]
+
+    style_features = [gram_matrix(style) for style in style_outputs]
+    content_features = content_outputs
+    return style_features, content_features
+
+style_targets, _ = extract_features(style_image)
+_, content_targets = extract_features(content_image)
+
+# Optimization
+generated_image = tf.Variable(content_image)
+optimizer = tf.optimizers.Adam(learning_rate=0.02)
+
+@tf.function
+def train_step(image):
+    with tf.GradientTape() as tape:
+        style_outputs, content_outputs = extract_features(image)
+
+        style_loss = tf.add_n([tf.reduce_mean((style_outputs[i] - style_targets[i])**2)
+                               for i in range(len(style_outputs))])
+        content_loss = tf.add_n([tf.reduce_mean((content_outputs[i] - content_targets[i])**2)
+                                 for i in range(len(content_outputs))])
+
+        loss = style_loss * 1e-2 + content_loss
+
+    grad = tape.gradient(loss, image)
+    optimizer.apply_gradients([(grad, image)])
+    image.assign(tf.clip_by_value(image, 0.0, 1.0))
+
+# Training loop
+epochs = 10
+for i in range(epochs):
+    train_step(generated_image)
+    print(f"Epoch {i+1}/{epochs} completed")
+
+# Show result
+show_image(generated_image, "Styled Image")
+plt.show()
